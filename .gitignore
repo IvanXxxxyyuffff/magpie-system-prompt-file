@@ -1,0 +1,16 @@
+# macOS
+.DS_Store
+*.swp
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Editors
+.idea/
+.vscode/
+*.log
+
+# The local evidence copy of the package (kept out of the repo: it is a
+# duplicate of the files next to it)
+artifacts/MODIFIED_FILE/

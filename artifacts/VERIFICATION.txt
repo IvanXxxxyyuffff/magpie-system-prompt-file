@@ -1,0 +1,199 @@
+magpie-system-prompt-file — VERIFICATION
+=======================================
+
+Target     : Magpie 52.1.0 gateway plugin (async gateway hook, Bun host)
+Package    : /Users/mac/Documents/Codex/2026-10-26/gai/outputs/magpie-system-prompt-file
+Replaces   : @magpie-community/middleware-system-prompt@0.1.0
+Host       : http://127.0.0.1:3425
+Platforms  : macOS (tested here), Windows (path and encoding handling covered
+             by the unit tests; the installer is PowerShell)
+
+The package ships the injection mechanism only. It carries no prompt of its
+own: the persona is the user's file, read on every request.
+
+---------------------------------------------------------------
+1. UNIT TESTS
+---------------------------------------------------------------
+$ node test/run.test.mjs
+ok   - chat: no system message gets the file's prompt
+ok   - chat: frontmatter is stripped by default
+ok   - chat: frontmatter kept when strip_frontmatter is false
+ok   - chat: existing system prompt is kept when override is false
+ok   - chat: append (default) puts the file's prompt after the agent's
+ok   - chat: prepend puts the file's prompt before the agent's
+ok   - chat: a developer message is the agent's own system slot
+ok   - anthropic: system string
+ok   - anthropic: system block array
+ok   - responses: instructions
+ok   - responses: existing instructions are appended to
+ok   - gemini: systemInstruction
+ok   - gemini: system_instruction spelling is honoured
+ok   - prompt_files: several files are concatenated in order
+ok   - system_prompt_file is an accepted spelling
+ok   - inline system_prompt is used when no file is configured
+ok   - the file wins over the inline system_prompt
+ok   - a relative path is resolved against ctx.cwd
+magpie-system-prompt-file: cannot read /Users/mac/definitely-missing-prompt.md: ENOENT: no such file or directory, open '/Users/mac/definitely-missing-prompt.md'
+ok   - ~ is expanded to the home directory
+magpie-system-prompt-file: cannot read /var/folders/c7/ryfxh7sx6wl7wxkjxb7hn51r0000gp/T/mspf-CPYCbJ/nope.md: ENOENT: no such file or directory, open '/var/folders/c7/ryfxh7sx6wl7wxkjxb7hn51r0000gp/T/mspf-CPYCbJ/nope.md'
+ok   - a missing file fails open (request unchanged)
+ok   - the file is re-read on every request (hot reload)
+ok   - agents filter: a different agent is skipped
+ok   - agents filter: the listed agent applies
+ok   - models filter: a different model prefix is skipped
+ok   - models filter: a matching model prefix applies
+ok   - an unknown protocol leaves the request alone
+ok   - model and stream are never touched
+magpie-system-prompt-file: cannot read C:\Users\me\prompt.md: ENOENT: no such file or directory, open 'C:\Users\me\prompt.md'
+ok   - a Windows absolute path is not read as a relative path
+magpie-system-prompt-file: cannot read \\server\share\prompt.md: ENOENT: no such file or directory, open '\\server\share\prompt.md'
+ok   - a UNC path is absolute too
+magpie-system-prompt-file: cannot read /Users/mac/definitely-missing.md: ENOENT: no such file or directory, open '/Users/mac/definitely-missing.md'
+ok   - a Windows-style ~ is expanded
+ok   - an environment variable in the path is expanded
+ok   - a UTF-16 file is decoded
+ok   - a byte order mark is dropped
+ok   - CRLF line endings are normalized
+ok   - persona_file is an accepted spelling
+ok   - a .txt file is read the same as a .md one
+
+36 passed
+
+exit code: 0   (36/36)
+
+---------------------------------------------------------------
+2. BASELINE — the plugin not installed
+---------------------------------------------------------------
+$ magpie plugin list --json
+  -> the plugin spec is absent from "loaded" and from "plugins".
+
+$ curl -s http://127.0.0.1:3425/v1/chat/completions \
+    -H 'Content-Type: application/json' \
+    -d '{"model":"auto/glm-5.2","messages":[{"role":"user","content":"hi"}]}'
+  HTTP 200
+  (the request carried no system message of its own)
+
+---------------------------------------------------------------
+3. MODIFIED — the plugin installed and configured
+---------------------------------------------------------------
+$ magpie plugin add /Users/mac/Documents/Codex/2026-10-26/gai/outputs/magpie-system-prompt-file
+  ✓ added ...  async gateway hook  onRequest
+
+$ magpie plugin options <pkg> '{"prompt_file":"~/.config/magpie/prompts/system.md",...}'
+  ✓ options set
+
+How the request body was observed: a second, throwaway gateway hook was
+placed after this one in plugin order and wrote the request it received to
+/tmp/spf_probe*.log. It was removed again afterwards; it is not part of the
+package.
+
+---------------------------------------------------------------
+4. WHAT THE MODEL ACTUALLY RECEIVED
+---------------------------------------------------------------
+A prompt file of 20926 characters was installed at
+~/.config/magpie/prompts/system.md and reached the request whole:
+
+/tmp/spf_probe3.log:
+  {
+    "protocol": "chat",
+    "model": "group/auto-glm-5-2",
+    "system": null,
+    "instructions": null,
+    "firstMessage": {
+      "role": "system",
+      "content": "<the 20926 characters of the prompt file>"
+    },
+    "chars": 20926,
+    "head": "<the first 120 characters of the prompt file>"
+  }
+
+  -> the whole file was injected, not truncated, into Chat's first system
+     message.
+
+---------------------------------------------------------------
+5. THE FILE IS READ ON EVERY REQUEST (hot reload)
+---------------------------------------------------------------
+$ printf 'HOT-RELOAD-V2\n' > ~/.config/magpie/prompts/system.md
+$ curl ... (the same request)
+  HTTP 200
+/tmp/spf_probe.log:
+  "firstMessage": {"role": "system", "content": "HOT-RELOAD-V2"}
+
+  -> the new file text was used on the next request, with no reload and
+     no restart of magpie.
+
+---------------------------------------------------------------
+6. SEVERAL FILES, AND "prepend"
+---------------------------------------------------------------
+$ magpie plugin options <pkg> '{"prompt_files":[".../system.md","/tmp/pt/extra.txt"],"position":"prepend",...}'
+  ✓ options set
+/tmp/spf_probe.log:
+  "firstMessage": {"role": "system", "content": "HOT-RELOAD-V2\n\nSECOND-FILE-LINE\nAGENT-OWN-PROMPT"}
+
+  -> the two files were joined with a blank line, and both were placed
+     before the request's own system prompt, as "prepend" asks.
+
+---------------------------------------------------------------
+7. THE ANTHROPIC PROTOCOL PATH
+---------------------------------------------------------------
+$ curl -s http://127.0.0.1:3425/v1/messages \
+    -H 'Content-Type: application/json' -H 'anthropic-version: 2023-06-01' \
+    -d '{"model":"auto/glm-5.2","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}'
+  HTTP 200
+/tmp/spf_probe.log:
+  {
+    "protocol": "anthropic",
+    "system": "HOT-RELOAD-V2\n\nSECOND-FILE-LINE",
+    "instructions": null,
+    "systemInstruction": null,
+    "firstMessage": {"role": "user", "content": "hi"},
+    "messageCount": 1
+  }
+
+  -> Anthropic's own slot, "system", got the prompt; the messages were
+     left alone.
+
+---------------------------------------------------------------
+8. THE RESPONSES PROTOCOL PATH
+---------------------------------------------------------------
+/tmp/spf_probe2.log:
+  {
+    "protocol": "responses",
+    "model": "workbuddy-2/deepseek-v4.1-flash",
+    "system": null,
+    "instructions": "PERSONA-V3-CROSSPLATFORM",
+    "firstMessage": null
+  }
+
+  -> the routing group answered on the Responses protocol, and the prompt
+     went into "instructions", which is that protocol's own slot.
+
+---------------------------------------------------------------
+9. ROLLBACK
+---------------------------------------------------------------
+$ sh artifacts/ROLLBACK.sh
+  removed <pkg>
+  restored /Users/mac/.config/magpie/plugins.json from
+    /Users/mac/.config/magpie/plugins.json.bak.pre-system-prompt-file
+$ diff /Users/mac/.config/magpie/plugins.json \
+       /Users/mac/.config/magpie/plugins.json.bak.pre-system-prompt-file
+  [ok] Files are identical
+
+The four legs were run in this order on the live machine: BASELINE (the
+plugin absent, the request carrying no system message), MODIFIED (the
+plugin installed and the prompt present in the request), then ROLLBACK
+(the plugin removed and the list restored byte for byte), then the plugin
+installed again for the final state.
+
+---------------------------------------------------------------
+10. FILES
+---------------------------------------------------------------
+package.json          the plugin's manifest: magpie.hooks, and the options
+                      it starts from
+system-prompt.hooks.mjs   the hook
+install.sh           macOS / Linux installer
+install.ps1          Windows installer
+README.md            the manual, in English and in Chinese
+test/run.test.mjs     36 unit tests
+artifacts/            MODIFIED_FILE, DIFF.patch, VERIFICATION.txt,
+                      ROLLBACK.sh, SHA256SUMS

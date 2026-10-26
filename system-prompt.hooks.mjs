@@ -1,0 +1,258 @@
+// Magpie asynchronous gateway hook: a system prompt ("persona") loaded from
+// a local .md / .txt file, injected into every agent request in each agent
+// API's own place.
+//
+//   {"prompt_file": "~/.config/magpie/prompts/system.md",
+//    "prompt_files": [],
+//    "system_prompt": "",
+//    "override": true,
+//    "position": "append",
+//    "agents": [],
+//    "models": [],
+//    "strip_frontmatter": true}
+//
+// The file is read on every request, so editing it takes effect on the next
+// call without reloading the plugin. A request with no system prompt is
+// given the file's. One that has its own keeps it as it is, unless override
+// is true: then the file's is added before it ("prepend") or after it
+// ("append", the default, which keeps a prompt cache on the agent's own
+// prompt). agents and models, when given, are the only agents and model
+// name prefixes it applies to.
+//
+// This runs in the Bun plugin host, so node:fs is available here; the
+// synchronous middleware engine has no filesystem access at all.
+//
+// The body is handed over as a copy: returning a body replaces the
+// request, and returning undefined keeps it as it was.
+//
+// macOS and Windows: paths are resolved the way the host resolves them
+// (a relative path against the request's working directory), "~" is the
+// home directory on both, and a path written on one system is recognized
+// on the other instead of being mangled.
+
+import { readFile } from "node:fs/promises"
+import { homedir } from "node:os"
+import { resolve } from "node:path"
+
+const FRONTMATTER = /^---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/
+
+// A path is absolute when it looks absolute on either system, so a config
+// written on Windows is not read as a relative path on macOS, and the
+// other way round.
+const WIN_ABS = /^[A-Za-z]:[\\/]/
+const UNC_ABS = /^\\\\/
+const POSIX_ABS = /^\//
+
+export async function onRequest(body, ctx) {
+  const o = ctx.options || {}
+  const files = collectFiles(o)
+
+  let prompt = ""
+  if (files.length) {
+    const parts = []
+    for (const file of files) {
+      const text = await readPrompt(file, ctx)
+      if (text) parts.push(text)
+    }
+    prompt = parts.join("\n\n")
+  } else if (typeof o.system_prompt === "string") {
+    prompt = o.system_prompt
+  }
+
+  if (!prompt) return undefined
+  if (!applies(o, body, ctx)) return undefined
+
+  const before = o.position === "prepend"
+  const over = o.override !== false
+
+  switch (ctx.protocol) {
+    case "anthropic":
+      return anthropic(body, prompt, over, before)
+    case "chat":
+      return chat(body, prompt, over, before)
+    case "responses":
+      return responses(body, prompt, over, before)
+    case "gemini":
+      return gemini(body, prompt, over, before)
+    default:
+      return undefined
+  }
+}
+
+// The files to read, in order. "prompt_file(s)" and "system_prompt_file(s)"
+// and "persona_file(s)" are the same option under different names.
+function collectFiles(o) {
+  const out = []
+  const one = o.prompt_file ?? o.system_prompt_file ?? o.persona_file
+  if (typeof one === "string" && one.trim()) out.push(one.trim())
+  const many = o.prompt_files ?? o.system_prompt_files ?? o.persona_files
+  if (Array.isArray(many)) {
+    for (const f of many) if (typeof f === "string" && f.trim()) out.push(f.trim())
+  }
+  return out
+}
+
+async function readPrompt(file, ctx) {
+  const path = expand(file, ctx)
+  try {
+    const raw = await readFile(path)
+    return clean(decode(raw), ctx.options || {})
+  } catch (e) {
+    // A missing or unreadable prompt file must not break the request: the
+    // hook reports it and leaves the request as it was.
+    console.error("magpie-system-prompt-file: cannot read " + path + ": " + (e?.message ?? e))
+    return ""
+  }
+}
+
+// decode reads the bytes as the text they are. A file saved by a Windows
+// editor may carry a byte order mark, and older editors save UTF-16, which
+// read as UTF-8 would be unreadable.
+function decode(buf) {
+  if (buf.length >= 2) {
+    // UTF-16 little endian
+    if (buf[0] === 0xff && buf[1] === 0xfe) return buf.subarray(2).toString("utf16le")
+    // UTF-16 big endian: swap the bytes, then read it as little endian
+    if (buf[0] === 0xfe && buf[1] === 0xff) {
+      const swapped = Buffer.from(buf.subarray(2))
+      swapped.swap16()
+      return swapped.toString("utf16le")
+    }
+  }
+  if (buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) {
+    return buf.subarray(3).toString("utf8")
+  }
+  // UTF-16 without a byte order mark: a Windows editor that saves it
+  // without one leaves every other byte at zero.
+  const width = utf16Width(buf)
+  if (width === 2) return buf.toString("utf16le")
+  if (width === -2) {
+    const swapped = Buffer.from(buf)
+    swapped.swap16()
+    return swapped.toString("utf16le")
+  }
+  return buf.toString("utf8")
+}
+
+// utf16Width tells whether the bytes are UTF-16 and in which order: it
+// returns 2 for little endian, -2 for big endian and 0 when they are not.
+// ASCII text in UTF-16 has every second byte at zero, on one side or the
+// other; UTF-8 text never has a zero byte in it.
+function utf16Width(buf) {
+  const n = Math.min(buf.length, 512)
+  if (n < 4) return 0
+  let even = 0
+  let odd = 0
+  for (let i = 0; i < n; i++) {
+    if (buf[i] === 0) (i % 2 === 0 ? even++ : odd++)
+  }
+  const half = n / 2
+  if (odd > half * 0.6 && even < half * 0.1) return 2
+  if (even > half * 0.6 && odd < half * 0.1) return -2
+  return 0
+}
+
+// expand turns the configured path into a real one: environment variables
+// first, then "~" for the home directory, then a relative path against the
+// request's working directory.
+function expand(file, ctx) {
+  let p = envVars(file.trim())
+  if (p === "~" || p.startsWith("~/") || p.startsWith("~\\")) {
+    p = joinHome(p.slice(1))
+  }
+  if (looksAbsolute(p)) return p
+  const base = typeof ctx.cwd === "string" && ctx.cwd ? ctx.cwd : process.cwd()
+  return resolve(base, p)
+}
+
+// envVars expands $VAR, ${VAR} and %VAR% (the Windows spelling). A name
+// that is not set is left as it is.
+function envVars(p) {
+  return p
+    .replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (m, n) => process.env[n] ?? m)
+    .replace(/\$([A-Za-z_][A-Za-z0-9_]*)/g, (m, n) => process.env[n] ?? m)
+    .replace(/%([A-Za-z_][A-Za-z0-9_]*)%/g, (m, n) => process.env[n] ?? m)
+}
+
+function joinHome(rest) {
+  if (!rest) return homedir()
+  const home = homedir()
+  const tail = rest.replace(/^[\\/]+/, "")
+  return tail ? resolve(home, tail) : home
+}
+
+function looksAbsolute(p) {
+  return WIN_ABS.test(p) || UNC_ABS.test(p) || POSIX_ABS.test(p)
+}
+
+function clean(raw, opts) {
+  let text = raw.replace(/\r\n/g, "\n").replace(/^﻿/, "")
+  if (opts.strip_frontmatter !== false) text = text.replace(FRONTMATTER, "")
+  return text.trim()
+}
+
+function applies(opts, body, ctx) {
+  if (Array.isArray(opts.agents) && opts.agents.length && !opts.agents.includes(ctx.agent)) return false
+  if (Array.isArray(opts.models) && opts.models.length) {
+    const model = String(body.model ?? ctx.model ?? "")
+    if (!opts.models.some((m) => typeof m === "string" && model.startsWith(m))) return false
+  }
+  return true
+}
+
+function anthropic(body, prompt, over, before) {
+  const s = body.system
+  if (s === undefined || s === null || s === "" || (Array.isArray(s) && !s.length)) {
+    body.system = prompt
+    return body
+  }
+  if (!over) return undefined
+  if (typeof s === "string") body.system = before ? prompt + "\n" + s : s + "\n" + prompt
+  else if (Array.isArray(s)) {
+    const block = { type: "text", text: prompt }
+    if (before) s.unshift(block)
+    else s.push(block)
+  } else return undefined
+  return body
+}
+
+function chat(body, prompt, over, before) {
+  if (!Array.isArray(body.messages)) return undefined
+  const first = body.messages[0]
+  if (!first || (first.role !== "system" && first.role !== "developer")) {
+    body.messages.unshift({ role: "system", content: prompt })
+    return body
+  }
+  if (!over) return undefined
+  if (typeof first.content === "string") first.content = before ? prompt + "\n" + first.content : first.content + "\n" + prompt
+  else if (Array.isArray(first.content)) {
+    const part = { type: "text", text: prompt }
+    if (before) first.content.unshift(part)
+    else first.content.push(part)
+  } else return undefined
+  return body
+}
+
+function responses(body, prompt, over, before) {
+  const s = body.instructions
+  if (typeof s !== "string" || !s) {
+    body.instructions = prompt
+    return body
+  }
+  if (!over) return undefined
+  body.instructions = before ? prompt + "\n" + s : s + "\n" + prompt
+  return body
+}
+
+function gemini(body, prompt, over, before) {
+  const key = body.system_instruction && !body.systemInstruction ? "system_instruction" : "systemInstruction"
+  const s = body[key]
+  if (!s || !Array.isArray(s.parts) || !s.parts.length) {
+    body[key] = { parts: [{ text: prompt }] }
+    return body
+  }
+  if (!over) return undefined
+  if (before) s.parts.unshift({ text: prompt })
+  else s.parts.push({ text: prompt })
+  return body
+}
