@@ -94,7 +94,23 @@ Magpie's own binary on macOS is at
 
 ### Install on Windows
 
-PowerShell:
+**The installer (recommended).** Download
+`magpie-system-prompt-file-setup.exe` from the
+[releases page](https://github.com/IvanXxxxyyuffff/magpie-system-prompt-file/releases),
+double-click it and press Next. It needs no administrator rights, and it:
+
+1. copies the plugin into
+   `%USERPROFILE%\.config\magpie\plugins\magpie-system-prompt-file`,
+2. writes the persona to
+   `%USERPROFILE%\.config\magpie\prompts\system.md` (an existing file
+   there is left alone),
+3. registers the plugin with magpie and sets its options,
+4. leaves an uninstaller and a shortcut on the desktop.
+
+Uninstall it from Windows' Installed apps, or with the `Uninstall
+magpie-system-prompt-file` shortcut in the Start menu.
+
+**By hand.** PowerShell:
 
 ```powershell
 git clone https://github.com/IvanXxxxyyuffff/magpie-system-prompt-file.git
@@ -277,7 +293,22 @@ macOS 上 Magpie 自己的可执行文件在
 
 ### Windows 怎么安装
 
-PowerShell：
+**用安装包（推荐）。** 到
+[Releases 页面](https://github.com/IvanXxxxyyuffff/magpie-system-prompt-file/releases)
+下载 `magpie-system-prompt-file-setup.exe`，双击，一路 Next 就行。**不需要管理员
+权限**，它会：
+
+1. 把插件复制到
+   `%USERPROFILE%\.config\magpie\plugins\magpie-system-prompt-file`；
+2. 把人格写入
+   `%USERPROFILE%\.config\magpie\prompts\system.md`（已有文件不会被覆盖）；
+3. 在 Magpie 里注册插件并设置好选项；
+4. 留下卸载程序和桌面快捷方式。
+
+卸载：Windows 设置 → 已安装的应用里找到它卸载，或用开始菜单里的
+`Uninstall magpie-system-prompt-file` 快捷方式。
+
+**手动安装。** PowerShell：
 
 ```powershell
 git clone https://github.com/IvanXxxxyyuffff/magpie-system-prompt-file.git
