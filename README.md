@@ -110,6 +110,18 @@ double-click it and press Next. It needs no administrator rights, and it:
 Uninstall it from Windows' Installed apps, or with the `Uninstall
 magpie-system-prompt-file` shortcut in the Start menu.
 
+**Where magpie is installed does not matter.** The Windows build of
+magpie is a single `magpie.exe` you download and run where you like —
+`Downloads` is the usual place, and it is neither on `PATH` nor under
+`%LOCALAPPDATA%\Programs`. The installer writes magpie's `plugins.json`
+itself, so the plugin shows up in Plugins whether magpie is in `Downloads`,
+on the desktop, in `Programs`, or somewhere else entirely. When the CLI is
+found it is used as well, so magpie reloads the list at once.
+
+If magpie is not installed yet, the installer still puts everything in
+place; install magpie afterwards and run the shortcut on your desktop
+(`magpie-system-prompt-file`) once, and it registers the plugin.
+
 **By hand.** PowerShell:
 
 ```powershell
@@ -307,6 +319,15 @@ macOS 上 Magpie 自己的可执行文件在
 
 卸载：Windows 设置 → 已安装的应用里找到它卸载，或用开始菜单里的
 `Uninstall magpie-system-prompt-file` 快捷方式。
+
+**Magpie 装在哪都不影响。** Windows 版 Magpie 就是一个你下载下来自己放的
+`magpie.exe`——通常在 `Downloads`，**既不在 PATH，也不在
+`%LOCALAPPDATA%\Programs`**。安装器会直接写 magpie 的 `plugins.json`，所以
+无论 Magpie 在 `Downloads`、桌面、`Programs` 还是别的地方，插件都会出现在
+Plugins 列表里。找到 CLI 时还会顺便调用它，让 magpie 立刻重载。
+
+如果当时还没装 Magpie，安装器也会把文件都放好；之后装上 Magpie，再运行一次
+桌面上的 `magpie-system-prompt-file` 快捷方式，插件就注册上了。
 
 **手动安装。** PowerShell：
 

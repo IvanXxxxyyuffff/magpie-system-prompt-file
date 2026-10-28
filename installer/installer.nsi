@@ -1,17 +1,19 @@
-; magpie-system-prompt-file installer
+﻿; magpie-system-prompt-file installer
 ;
 ;   1. copy the plugin into %USERPROFILE%\.config\magpie\plugins\
-;   2. create %USERPROFILE%\.config\magpie\prompts\system.md if it is
-;      not there yet
-;   3. register the plugin with magpie and set its options
+;   2. write the persona to %USERPROFILE%\.config\magpie\prompts\system.md
+;      when the user has no prompt file yet (an existing one is kept)
+;   3. put the plugin into magpie's plugins.json and register it with
+;      magpie's CLI when it can be found
 ;
-; The prompt file is the user's own: an existing one is never overwritten.
+; Nothing here needs administrator rights: everything is written under the
+; user's own profile.
 
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
 
 !define PLUGIN_NAME "magpie-system-prompt-file"
-!define PLUGIN_VERSION "0.4.0"
+!define PLUGIN_VERSION "0.5.0"
 !define PUBLISHER "IvanXxxxyyuffff"
 !define HELPER "RegisterMagpiePlugin.exe"
 
@@ -37,16 +39,23 @@ VIAddVersionKey "LegalCopyright" "MIT"
 !define MUI_ICON "magpie.ico"
 !define MUI_UNICON "magpie.ico"
 
+!define MUI_FINISHPAGE_RUN "notepad.exe"
+!define MUI_FINISHPAGE_RUN_FUNCTION OpenPromptFile
+!define MUI_FINISHPAGE_RUN_TEXT "打开人格文件 / Open the persona file"
+
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_INSTFILES
-!insertmacro MUI_FINISHPAGE_RUN
-!insertmacro MUI_FINISHPAGE_RUN_TEXT "打开提示词文件 / Open the prompt file"
-!insertmacro MUI_FINISHPAGE_RUN_FUNCTION OpenPromptFile
+!insertmacro MUI_PAGE_FINISH
 
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "English"
 !insertmacro MUI_LANGUAGE "SimpChinese"
+
+Var PLUGIN_DIR
+Var PROMPTS_DIR
+Var PKG_DIR
+Var LOG_FILE
 
 Section "Install" SecInstall
   SectionIn RO
@@ -55,38 +64,53 @@ Section "Install" SecInstall
   File "payload\README.md"
   File "payload\LICENSE"
   SetOutPath "$INSTDIR\payload"
+  File "payload\install.ps1"
   File "payload\package.json"
   File "payload\system-prompt.hooks.mjs"
+  File "payload\system.md"
 
   ; magpie keeps its files in %USERPROFILE%\.config\magpie on Windows too
-  CreateDirectory "$PLUGIN_DIR"
+  StrCpy $PLUGIN_DIR "$PROFILE\.config\magpie\plugins"
+  StrCpy $PROMPTS_DIR "$PROFILE\.config\magpie\prompts"
+  StrCpy $PKG_DIR "$PLUGIN_DIR\${PLUGIN_NAME}"
+  CreateDirectory "$PKG_DIR"
   CreateDirectory "$PROMPTS_DIR"
 
-  ; the prompt file: created only when the user has none yet
+  ; the plugin's own copy inside magpie's plugins folder
+  CopyFiles "$INSTDIR\payload\package.json" "$PKG_DIR\package.json"
+  CopyFiles "$INSTDIR\payload\system-prompt.hooks.mjs" "$PKG_DIR\system-prompt.hooks.mjs"
+
+  ; the persona: written only when the user has no prompt file yet
   IfFileExists "$PROMPTS_DIR\system.md" 0 0
-    ClearErrors
-    FileOpen $0 "$PROMPTS_DIR\system.md" w
-    IfErrors 0 0
-      FileWrite $0 "---$\r$\n"
-      FileWrite $0 "title: system$\r$\n"
-      FileWrite $0 "---$\r$\n$\r$\n"
-      FileWrite $0 "<!-- Put your own system prompt (persona) here.$\r$\n"
-      FileWrite $0 "     This file is read on every request, so editing it takes effect at once,$\r$\n"
-      FileWrite $0 "     with no reload and no restart. Markdown and plain text both work. -->$\r$\n"
-      FileClose $0
+    CopyFiles "$INSTDIR\payload\system.md" "$PROMPTS_DIR\system.md"
+    DetailPrint "Writing the persona to $PROMPTS_DIR\system.md"
 
   WriteRegStr HKCU "Software\${PLUGIN_NAME}" "InstallDir" "$INSTDIR"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
 
   ; register with magpie now, so the plugin works without a second step
   DetailPrint "Registering the plugin with magpie..."
-  ExecWait '"$INSTDIR\${HELPER}" --quiet' $0
-  ${If} $0 == 2
-    DetailPrint "magpie was not found. Install magpie, then run the shortcut on your desktop to register the plugin."
-  ${ElseIf} $0 != 0
-    DetailPrint "Could not run magpie's CLI (exit $0). Use the shortcut on your desktop to finish."
+  StrCpy $LOG_FILE "$TEMP\${PLUGIN_NAME}-install.log"
+  DetailPrint "  (a log is left at $LOG_FILE)"
+  ; the script writes its own log: NSIS's ExecWait cannot redirect
+  ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\payload\install.ps1" -Log "$LOG_FILE"' $0
+  ${If} $0 == 0
+    DetailPrint "Done."
+  ${ElseIf} $0 == 9009
+    DetailPrint "PowerShell was not found. Use the shortcut on your desktop to finish."
   ${Else}
-    DetailPrint "Registered."
+    DetailPrint "The script reported a problem (exit $0). See $LOG_FILE"
+  ${EndIf}
+
+  ; the helper is the fallback: it writes the plugin list by itself
+  ${If} $0 != 0
+    DetailPrint "Falling back to the bundled helper..."
+    ExecWait '"$INSTDIR\${HELPER}" --quiet' $1
+    ${If} $1 == 0
+      DetailPrint "Done."
+    ${Else}
+      DetailPrint "Could not finish (exit $1). Run the desktop shortcut once magpie is installed."
+    ${EndIf}
   ${EndIf}
 
   CreateShortCut "$DESKTOP\${PLUGIN_NAME}.lnk" "$INSTDIR\${HELPER}"
@@ -103,6 +127,9 @@ Section "Uninstall"
   Delete "$INSTDIR\LICENSE"
   Delete "$INSTDIR\payload\package.json"
   Delete "$INSTDIR\payload\system-prompt.hooks.mjs"
+  Delete "$INSTDIR\payload\system.md"
+  Delete "$INSTDIR\payload\install.ps1"
+  Delete "$INSTDIR\install.ps1"
   RMDir "$INSTDIR\payload"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"
@@ -114,7 +141,7 @@ Section "Uninstall"
 SectionEnd
 
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
-!insertmacro MUI_DESCRIPTION_TEXT ${PLUGIN_NAME} "Installs the Magpie gateway hook that reads a system prompt (persona) from a local .md / .txt file and injects it into every agent request.$n$nThe plugin is registered with magpie automatically. The prompt file lives at:$n$n$PROMPTS_DIR\system.md$n$nEdit it whenever you like: the file is read on every request, so a change takes effect at once, with no reload and no restart.$n$nMarkdown and plain text both work."
+!insertmacro MUI_DESCRIPTION_TEXT ${PLUGIN_NAME} "Installs the Magpie gateway hook that reads a system prompt (persona) from a local .md / .txt file and injects it into every agent request.$\\n$\\nThe plugin is registered with magpie automatically, and the persona that ships with it is written to %USERPROFILE%\\.config\\magpie\\prompts\\system.md (an existing file there is kept as it is).$\\n$\\nThe file is read on every request, so editing it takes effect at once, with no reload and no restart. Markdown and plain text both work."
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 
 Function OpenPromptFile
